@@ -1,3 +1,6 @@
+use std::convert::TryFrom;
+use std::iter::FromIterator;
+
 use crate::{OtelData, PreSampledTracer};
 use once_cell::unsync;
 use opentelemetry::{
@@ -33,6 +36,7 @@ const FIELD_EXCEPTION_STACKTRACE: &str = "exception.stacktrace";
 pub struct OpenTelemetryLayer<S, T> {
     tracer: T,
     location: bool,
+    max_events_per_span: Option<usize>,
     tracked_inactivity: bool,
     with_threads: bool,
     exception_config: ExceptionFieldConfig,
@@ -91,6 +95,25 @@ impl WithContext {
         mut f: impl FnMut(&mut OtelData, &dyn PreSampledTracer),
     ) {
         (self.0)(dispatch, id, &mut f)
+    }
+}
+
+/// Using [`OpenTelemetryLayer::max_events_per_span`] you can limit the number
+/// of [`otel::Event`]s that we'll record for a given span. If we exceed this
+/// limit we'll keep a count of how many events we've dropped.
+#[derive(Debug)]
+struct DroppedOtelEvents {
+    // how many events we've dropped thus far
+    dropped_count: usize,
+}
+
+impl DroppedOtelEvents {
+    fn new() -> Self {
+        DroppedOtelEvents { dropped_count: 0 }
+    }
+
+    fn add_dropped(&mut self, additional_count: usize) {
+        self.dropped_count = self.dropped_count.saturating_add(additional_count);
     }
 }
 
@@ -427,6 +450,7 @@ where
         OpenTelemetryLayer {
             tracer,
             location: true,
+            max_events_per_span: None,
             tracked_inactivity: true,
             with_threads: true,
             exception_config: ExceptionFieldConfig {
@@ -471,6 +495,7 @@ where
         OpenTelemetryLayer {
             tracer,
             location: self.location,
+            max_events_per_span: self.max_events_per_span,
             tracked_inactivity: self.tracked_inactivity,
             with_threads: self.with_threads,
             exception_config: self.exception_config,
@@ -577,6 +602,23 @@ where
     pub fn with_threads(self, threads: bool) -> Self {
         Self {
             with_threads: threads,
+            ..self
+        }
+    }
+
+    /// Sets the maximum number of [`otel::Event`] that we will store for any given
+    /// span. If we exceed this number, we will drop the first half of our buffered
+    /// events and maintain a count of events dropped thus far.
+    ///
+    /// By default, there is no maximum
+    ///
+    /// Note: This can be very useful when tracing at a `Debug` or `Trace` level. Some
+    /// crates (e.g. `h2`) maintain long living spans which result in events
+    /// continuously getting recorded, but never flushed. So in these cases you'd keep
+    /// buffering events until you run out of memory (OOM).
+    pub fn max_events_per_span(self, num: usize) -> Self {
+        Self {
+            max_events_per_span: Some(num),
             ..self
         }
     }
@@ -849,7 +891,9 @@ where
                 exception_config: self.exception_config,
             });
 
-            if let Some(OtelData { builder, .. }) = extensions.get_mut::<OtelData>() {
+            let dropped_events = if let Some(OtelData { builder, .. }) =
+                extensions.get_mut::<OtelData>()
+            {
                 if builder.status == otel::Status::Unset
                     && *meta.level() == tracing_core::Level::ERROR
                 {
@@ -892,6 +936,39 @@ where
                 } else {
                     builder.events = Some(vec![otel_event]);
                 }
+
+                // limit the maximum number of events we'll record per-span
+                match (self.max_events_per_span, &mut builder.events) {
+                    (Some(max_num_events), Some(ref mut events))
+                        if events.len() > max_num_events =>
+                    {
+                        // drain half of the existing events, using ceiling division
+                        // to handle the case where max_num_events is 0 or 1
+                        //
+                        // note: this should be more efficient than just continuously
+                        // popping the first element
+                        let num_events_to_drain = (events.len() + 2 - 1) / 2;
+                        events.drain(0..num_events_to_drain);
+
+                        Some(num_events_to_drain)
+                    }
+                    _ => None,
+                }
+            } else {
+                None
+            };
+
+            // record how many events we dropped
+            match (dropped_events, extensions.get_mut::<DroppedOtelEvents>()) {
+                (Some(additional_dropped), Some(current_dropped)) => {
+                    current_dropped.add_dropped(additional_dropped);
+                }
+                (Some(additional_dropped), None) => {
+                    let mut count = DroppedOtelEvents::new();
+                    count.add_dropped(additional_dropped);
+                    extensions.insert(count);
+                }
+                _ => (),
             }
         };
     }
@@ -919,6 +996,20 @@ where
                         .get_or_insert_with(|| OrderMap::with_capacity(2));
                     attributes.insert(busy_ns, timings.busy.into());
                     attributes.insert(idle_ns, timings.idle.into());
+                }
+            }
+
+            // Report the number of events that were dropped, if we dropped any
+            if let Some(DroppedOtelEvents { dropped_count }) =
+                extensions.remove::<DroppedOtelEvents>()
+            {
+                let k = Key::from_static_str("dropped_event_count");
+                let v = Value::I64(i64::try_from(dropped_count).unwrap_or(i64::MAX));
+
+                if let Some(ref mut attributes) = builder.attributes {
+                    attributes.insert(k, v);
+                } else {
+                    builder.attributes = Some(OrderMap::from_iter([KeyValue::new(k, v)]));
                 }
             }
 
@@ -985,6 +1076,7 @@ mod tests {
         time::SystemTime,
     };
     use tracing_subscriber::prelude::*;
+    use tracing_subscriber::registry::LookupSpan;
 
     #[derive(Debug, Clone)]
     struct TestTracer(Arc<Mutex<Option<OtelData>>>);
@@ -1397,5 +1489,210 @@ mod tests {
                 .into()
             )
         );
+    }
+
+    #[test]
+    fn tracks_dropped_events() {
+        let tracer = TestTracer(Arc::new(Mutex::new(None)));
+        let subscriber = tracing_subscriber::registry()
+            .with(layer().with_tracer(tracer.clone()).max_events_per_span(4));
+        let subscriber = Arc::new(subscriber);
+
+        tracing::subscriber::with_default(subscriber.clone(), || {
+            let span = tracing::debug_span!("request");
+            let _span_guard = span.enter();
+
+            // we should record all 4 events
+            tracing::info!("event 1");
+            tracing::info!("event 2");
+            tracing::info!("event 3");
+            tracing::info!("event 4");
+
+            let data = span.id().and_then(|id| subscriber.span(&id)).unwrap();
+            let extensions = data.extensions();
+
+            // we shouldn't have recoreded any dropped events
+            assert!(extensions.get::<DroppedOtelEvents>().is_none());
+
+            // we should have all 4 events
+            let otel_data = extensions.get::<OtelData>().unwrap();
+            let otel_events = otel_data.builder.events.as_ref().unwrap();
+            assert_eq!(otel_events.len(), 4);
+
+            drop(extensions);
+            drop(data);
+
+            // record a 5th event, which is over our max of 4
+            tracing::info!("event 5");
+
+            let data = span.id().and_then(|id| subscriber.span(&id)).unwrap();
+            let extensions = data.extensions();
+
+            // since we're over our limit we should start dropping events
+            let dropped_events = extensions.get::<DroppedOtelEvents>().unwrap();
+            assert_eq!(dropped_events.dropped_count, 3);
+
+            let otel_data = extensions.get::<OtelData>().unwrap();
+            let otel_events = otel_data.builder.events.as_ref().unwrap();
+            // dropped 3, pushed one more
+            assert_eq!(otel_events.len(), 2);
+
+            drop(extensions);
+            drop(data);
+
+            // record many events!
+            for i in 6..99 {
+                tracing::info!("event {}", i);
+            }
+
+            let data = span.id().and_then(|id| subscriber.span(&id)).unwrap();
+            let extensions = data.extensions();
+
+            // we should have dropped a ton of events, and recorded that we did
+            let dropped_events = extensions.get::<DroppedOtelEvents>().unwrap();
+            assert_eq!(dropped_events.dropped_count, 96);
+
+            let otel_data = extensions.get::<OtelData>().unwrap();
+            let otel_events = otel_data.builder.events.as_ref().unwrap();
+            assert_eq!(otel_events.len(), 2);
+
+            // even though we pushed a ton of events, the capacity of our buffer
+            // should still be small
+            assert_eq!(otel_events.capacity(), 8);
+        });
+
+        // on close we should report the number of events we dropped
+        let attributes = tracer.with_data(|data| data.builder.attributes.as_ref().unwrap().clone());
+        let dropped_count_value = attributes.get(&Key::new("dropped_event_count")).unwrap();
+        let dropped_count: i64 = dropped_count_value.as_str().parse().unwrap();
+
+        assert_eq!(dropped_count, 96);
+    }
+
+    #[test]
+    fn max_events_per_span_zero() {
+        let tracer = TestTracer(Arc::new(Mutex::new(None)));
+        let subscriber = tracing_subscriber::registry()
+            .with(layer().with_tracer(tracer.clone()).max_events_per_span(0));
+        let subscriber = Arc::new(subscriber);
+
+        tracing::subscriber::with_default(subscriber.clone(), || {
+            let span = tracing::debug_span!("request");
+            let _span_guard = span.enter();
+
+            // record one event
+            tracing::info!("event 1");
+
+            let data = span.id().and_then(|id| subscriber.span(&id)).unwrap();
+            let extensions = data.extensions();
+
+            // it should immediately get dropped
+            let dropped_events = extensions.get::<DroppedOtelEvents>().unwrap();
+            assert_eq!(dropped_events.dropped_count, 1);
+
+            let otel_data = extensions.get::<OtelData>().unwrap();
+            let otel_events = otel_data.builder.events.as_ref().unwrap();
+            assert!(otel_events.is_empty());
+        });
+
+        // on close we should report the number of events we dropped
+        let attributes = tracer.with_data(|data| data.builder.attributes.as_ref().unwrap().clone());
+        let dropped_count_value = attributes.get(&Key::new("dropped_event_count")).unwrap();
+        let dropped_count: i64 = dropped_count_value.as_str().parse().unwrap();
+
+        assert_eq!(dropped_count, 1);
+    }
+
+    #[test]
+    fn exclude_max_events_per_span() {
+        let tracer = TestTracer(Arc::new(Mutex::new(None)));
+        let subscriber = tracing_subscriber::registry().with(layer().with_tracer(tracer.clone()));
+        let subscriber = Arc::new(subscriber);
+
+        tracing::subscriber::with_default(subscriber.clone(), || {
+            let span = tracing::debug_span!("request");
+            let _span_guard = span.enter();
+
+            // record one event
+            tracing::info!("event 1");
+
+            let data = span.id().and_then(|id| subscriber.span(&id)).unwrap();
+            let extensions = data.extensions();
+
+            // it should immediately get dropped
+            assert!(extensions.get::<DroppedOtelEvents>().is_none());
+        });
+
+        // on close we should not report the number of events we dropped, because no max was set
+        let attributes = tracer.with_data(|data| data.builder.attributes.as_ref().unwrap().clone());
+        assert!(!attributes.contains_key(&Key::new("dropped_event_count")));
+    }
+
+    #[test]
+    fn max_events_per_span_one() {
+        let tracer = TestTracer(Arc::new(Mutex::new(None)));
+        let subscriber = tracing_subscriber::registry()
+            .with(layer().with_tracer(tracer.clone()).max_events_per_span(1));
+        let subscriber = Arc::new(subscriber);
+
+        tracing::subscriber::with_default(subscriber.clone(), || {
+            let span = tracing::debug_span!("request");
+            let _span_guard = span.enter();
+
+            // record one event
+            tracing::info!("event 1");
+
+            let data = span.id().and_then(|id| subscriber.span(&id)).unwrap();
+            let extensions = data.extensions();
+
+            // we shouldn't have recoreded any dropped events
+            assert!(extensions.get::<DroppedOtelEvents>().is_none());
+
+            // we should have the event
+            let otel_data = extensions.get::<OtelData>().unwrap();
+            let otel_events = otel_data.builder.events.as_ref().unwrap();
+            assert_eq!(otel_events.len(), 1);
+
+            drop(extensions);
+            drop(data);
+
+            // record one more, we should drop the original
+            tracing::info!("event 2");
+
+            let data = span.id().and_then(|id| subscriber.span(&id)).unwrap();
+            let extensions = data.extensions();
+
+            // we shouldn't have recoreded any dropped events
+            let dropped_events = extensions.get::<DroppedOtelEvents>().unwrap();
+            assert_eq!(dropped_events.dropped_count, 1);
+
+            // we should have just one event
+            let otel_data = extensions.get::<OtelData>().unwrap();
+            let otel_events = otel_data.builder.events.as_ref().unwrap();
+            assert_eq!(otel_events.len(), 1);
+        });
+
+        // on close we should report the number of events we dropped
+        let attributes = tracer.with_data(|data| data.builder.attributes.as_ref().unwrap().clone());
+        let dropped_count_value = attributes.get(&Key::new("dropped_event_count")).unwrap();
+        let dropped_count: i64 = dropped_count_value.as_str().parse().unwrap();
+
+        assert_eq!(dropped_count, 1);
+    }
+
+    #[test]
+    fn max_events_enabled_not_exceeding_max() {
+        let tracer = TestTracer(Arc::new(Mutex::new(None)));
+        let subscriber = tracing_subscriber::registry()
+            .with(layer().with_tracer(tracer.clone()).max_events_per_span(32));
+        let subscriber = Arc::new(subscriber);
+
+        tracing::subscriber::with_default(subscriber.clone(), || {
+            tracing::debug_span!("request");
+        });
+
+        // we didn't exceed our max, so we shouldn't report anything
+        let attributes = tracer.with_data(|data| data.builder.attributes.as_ref().unwrap().clone());
+        assert!(!attributes.contains_key(&Key::new("dropped_event_count")));
     }
 }
