@@ -1,6 +1,6 @@
 [package]
 name = "tracing-opentelemetry"
-version = "0.19.0"
+version = "0.20.0"
 authors = [
     "Julian Tescher <julian@tescher.me>",
     "Tokio Contributors <team@tokio.rs>"
@@ -25,7 +25,7 @@ default = ["tracing-log", "metrics"]
 metrics = ["opentelemetry/metrics"]
 
 [dependencies]
-opentelemetry = { version = "0.19.0", default-features = false, features = ["trace"] }
+opentelemetry = { version = "0.20.0", default-features = false, features = ["trace"] }
 tracing = { version = "0.1.35", default-features = false, features = ["std"] }
 tracing-core = "0.1.28"
 tracing-subscriber = { version = "0.3.0", default-features = false, features = ["registry", "std"] }
@@ -38,12 +38,16 @@ thiserror = { version = "1.0.31", optional = true }
 
 [dev-dependencies]
 async-trait = "0.1.56"
-criterion = { version = "0.5.0", default-features = false }
-opentelemetry-jaeger = "0.18.0"
+criterion = { version = "0.4.0", default-features = false, features = ["html_reports"] }
+opentelemetry-jaeger = "0.19.0"
+opentelemetry-stdout = { version = "0.1.0", features = ["trace"] }
 futures-util = { version = "0.3", default-features = false }
 tokio = { version = "1", features = ["full"] }
 tokio-stream = "0.1"
 tracing = { version = "0.1.35", default-features = false, features = ["std", "attributes"] }
+
+[target.'cfg(not(target_os = "windows"))'.dev-dependencies]
+pprof = { version = "0.11.1", features = ["flamegraph", "criterion"] }
 
 [lib]
 bench = false
