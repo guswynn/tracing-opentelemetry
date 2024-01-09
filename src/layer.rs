@@ -1199,8 +1199,11 @@ where
                 let v = Value::I64(i64::try_from(dropped_count).unwrap_or(i64::MAX));
 
                 if let Some(ref mut attributes) = builder.attributes {
-                    // lalala
-                    attributes.push(KeyValue::new(k, v));
+                    if let Some(index) = attributes.iter().position(|kv| kv.key == k) {
+                        attributes[index] = KeyValue::new(k, v);
+                    } else {
+                        attributes.push(KeyValue::new(k, v));
+                    }
                 } else {
                     builder.attributes = Some(vec![KeyValue::new(k, v)]);
                 }
