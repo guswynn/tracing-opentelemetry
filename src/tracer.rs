@@ -1,5 +1,3 @@
-use opentelemetry::sdk::trace::{Tracer, TracerProvider};
-use opentelemetry::trace::OrderMap;
 use opentelemetry::{
     trace as otel,
     trace::{
@@ -8,6 +6,7 @@ use opentelemetry::{
     },
     Context as OtelContext,
 };
+use opentelemetry_sdk::trace::{Tracer as SdkTracer, TracerProvider as SdkTracerProvider};
 
 /// An interface for authors of OpenTelemetry SDKs to build pre-sampled tracers.
 ///
@@ -64,13 +63,12 @@ impl PreSampledTracer for noop::NoopTracer {
     }
 }
 
-impl PreSampledTracer for Tracer {
+impl PreSampledTracer for SdkTracer {
     fn sampled_context(&self, data: &mut crate::OtelData) -> OtelContext {
         // Ensure tracing pipeline is still installed.
-        if self.provider().is_none() {
+        let Some(provider) = self.provider() else {
             return OtelContext::new();
-        }
-        let provider = self.provider().unwrap();
+        };
         let parent_cx = &data.parent_cx;
         let builder = &mut data.builder;
 
@@ -86,7 +84,7 @@ impl PreSampledTracer for Tracer {
                 trace_id,
                 &builder.name,
                 builder.span_kind.as_ref().unwrap_or(&SpanKind::Internal),
-                builder.attributes.as_ref().unwrap_or(&OrderMap::default()),
+                builder.attributes.as_deref().unwrap_or(&[]),
                 builder.links.as_deref().unwrap_or(&[]),
             ));
 
@@ -118,7 +116,7 @@ impl PreSampledTracer for Tracer {
 fn current_trace_state(
     builder: &SpanBuilder,
     parent_cx: &OtelContext,
-    provider: &TracerProvider,
+    provider: &SdkTracerProvider,
 ) -> (TraceId, TraceFlags) {
     if parent_cx.has_active_span() {
         let span = parent_cx.span();
@@ -160,8 +158,8 @@ fn process_sampling_result(
 mod tests {
     use super::*;
     use crate::OtelData;
-    use opentelemetry::sdk::trace::{config, Sampler, TracerProvider};
     use opentelemetry::trace::{SpanBuilder, SpanId, TracerProvider as _};
+    use opentelemetry_sdk::trace::{config, Sampler, TracerProvider};
 
     #[test]
     fn assigns_default_trace_id_if_missing() {
@@ -194,7 +192,7 @@ mod tests {
             // Existing sampling result defers
             ("previous_drop_result_always_on", Sampler::AlwaysOn, OtelContext::new(), Some(SamplingResult { decision: SamplingDecision::Drop, attributes: vec![], trace_state: Default::default() }), false),
             ("previous_record_and_sample_result_always_off", Sampler::AlwaysOff, OtelContext::new(), Some(SamplingResult { decision: SamplingDecision::RecordAndSample, attributes: vec![], trace_state: Default::default() }), true),
- 
+
             // Existing local parent, defers
             ("previous_drop_result_always_on", Sampler::AlwaysOn, OtelContext::new(), Some(SamplingResult { decision: SamplingDecision::Drop, attributes: vec![], trace_state: Default::default() }), false),
             ("previous_record_and_sample_result_always_off", Sampler::AlwaysOff, OtelContext::new(), Some(SamplingResult { decision: SamplingDecision::RecordAndSample, attributes: vec![], trace_state: Default::default() }), true),

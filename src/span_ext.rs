@@ -17,7 +17,7 @@ pub trait OpenTelemetrySpanExt {
     ///
     /// ```rust
     /// use opentelemetry::{propagation::TextMapPropagator, trace::TraceContextExt};
-    /// use opentelemetry::sdk::propagation::TraceContextPropagator;
+    /// use opentelemetry_sdk::propagation::TraceContextPropagator;
     /// use tracing_opentelemetry::OpenTelemetrySpanExt;
     /// use std::collections::HashMap;
     /// use tracing::Span;
@@ -51,7 +51,7 @@ pub trait OpenTelemetrySpanExt {
     ///
     /// ```rust
     /// use opentelemetry::{propagation::TextMapPropagator, trace::TraceContextExt};
-    /// use opentelemetry::sdk::propagation::TraceContextPropagator;
+    /// use opentelemetry_sdk::propagation::TraceContextPropagator;
     /// use tracing_opentelemetry::OpenTelemetrySpanExt;
     /// use std::collections::HashMap;
     /// use tracing::Span;
@@ -143,7 +143,6 @@ impl OpenTelemetrySpanExt for tracing::Span {
                 get_context.with_context(subscriber, id, move |data, _tracer| {
                     if let Some(cx) = cx.take() {
                         data.parent_cx = cx;
-                        data.builder.trace_id = None;
                     }
                 });
             }
@@ -202,7 +201,7 @@ impl OpenTelemetrySpanExt for tracing::Span {
                         .attributes
                         .as_mut()
                         .unwrap()
-                        .insert(key.take().unwrap(), value.take().unwrap());
+                        .push(KeyValue::new(key.take().unwrap(), value.take().unwrap()));
                 })
             }
         });

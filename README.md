@@ -17,9 +17,9 @@ Utilities for adding [OpenTelemetry] interoperability to [`tracing`].
 [Documentation][docs-url] | [Chat][discord-url]
 
 [crates-badge]: https://img.shields.io/crates/v/tracing-opentelemetry.svg
-[crates-url]: https://crates.io/crates/tracing-opentelemetry/0.19.0
+[crates-url]: https://crates.io/crates/tracing-opentelemetry/0.22.0
 [docs-badge]: https://docs.rs/tracing-opentelemetry/badge.svg
-[docs-url]: https://docs.rs/tracing-opentelemetry/0.19.0/tracing_opentelemetry
+[docs-url]: https://docs.rs/tracing-opentelemetry/0.22.0/tracing_opentelemetry
 [docs-master-badge]: https://img.shields.io/badge/docs-master-blue
 [docs-master-url]: https://tracing-rs.netlify.com/tracing_opentelemetry
 [mit-badge]: https://img.shields.io/badge/license-MIT-blue.svg
@@ -50,7 +50,7 @@ The crate provides the following types:
 [`tracing`]: https://crates.io/crates/tracing
 [OpenTelemetry]: https://opentelemetry.io/
 
-*Compiler support: [requires `rustc` 1.60+][msrv]*
+*Compiler support: [requires `rustc` 1.65+][msrv]*
 
 [msrv]: #supported-rust-versions
 
@@ -59,14 +59,19 @@ The crate provides the following types:
 ### Basic Usage
 
 ```rust
-use opentelemetry::sdk::export::trace::stdout;
+use opentelemetry::trace::TracerProvider as _;
+use opentelemetry_sdk::trace::TracerProvider;
+use opentelemetry_stdout as stdout;
 use tracing::{error, span};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::Registry;
 
 fn main() {
-    // Install a new OpenTelemetry trace pipeline
-    let tracer = stdout::new_pipeline().install_simple();
+    // Create a new OpenTelemetry trace pipeline that prints to stdout
+    let provider = TracerProvider::builder()
+        .with_simple_exporter(stdout::SpanExporter::default())
+        .build();
+    let tracer = provider.tracer("readme_example");
 
     // Create a tracing layer with the configured tracer
     let telemetry = tracing_opentelemetry::layer().with_tracer(tracer);
@@ -84,6 +89,17 @@ fn main() {
         error!("This event will be logged in the root span.");
     });
 }
+```
+
+`Cargo.toml`
+```toml
+[dependencies]
+opentelemetry = "0.21"
+opentelemetry_sdk = "0.21"
+opentelemetry-stdout = { version = "0.2.0", features = ["trace"] }
+tracing = "0.1"
+tracing-opentelemetry = "0.22"
+tracing-subscriber = "0.3"
 ```
 
 ### Visualization example

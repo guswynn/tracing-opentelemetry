@@ -9,7 +9,7 @@
 //! [OpenTelemetry]: https://opentelemetry.io
 //! [`tracing`]: https://github.com/tokio-rs/tracing
 //!
-//! *Compiler support: [requires `rustc` 1.60+][msrv]*
+//! *Compiler support: [requires `rustc` 1.65+][msrv]*
 //!
 //! [msrv]: #supported-rust-versions
 //!
@@ -27,18 +27,18 @@
 //! * `otel.status_message`: Set the span status message.
 //!
 //! [span kinds]: opentelemetry::trace::SpanKind
-//! [span status codes]: opentelemetry::trace::StatusCode
+//! [span status codes]: opentelemetry::trace::Status
 //!
 //! ### Semantic Conventions
 //!
 //! OpenTelemetry defines conventional names for attributes of common
 //! operations. These names can be assigned directly as fields, e.g.
-//! `trace_span!("request", "otel.kind" = %SpanKind::Client, "http.url" = ..)`, and they
+//! `trace_span!("request", "otel.kind" = %SpanKind::Client, "url.full" = ..)`, and they
 //! will be passed through to your configured OpenTelemetry exporter. You can
 //! find the full list of the operations and their expected field names in the
 //! [semantic conventions] spec.
 //!
-//! [semantic conventions]: https://github.com/open-telemetry/opentelemetry-specification/tree/master/specification/trace/semantic_conventions
+//! [semantic conventions]: https://github.com/open-telemetry/semantic-conventions
 //!
 //! ### Stability Status
 //!
@@ -51,7 +51,7 @@
 //! ## Examples
 //!
 //! ```
-//! use opentelemetry::sdk::trace::TracerProvider;
+//! use opentelemetry_sdk::trace::TracerProvider;
 //! use opentelemetry::trace::{Tracer, TracerProvider as _};
 //! use tracing::{error, span};
 //! use tracing_subscriber::layer::SubscriberExt;
@@ -82,10 +82,12 @@
 //!
 //! ## Feature Flags
 //!
-//! - `metrics`: Enables the [`MetricsSubscriber`] type, a [subscriber] that
+//! - `metrics`: Enables the [`MetricsLayer`] type, a [layer] that
 //!   exports OpenTelemetry metrics from specifically-named events. This enables
 //!   the `metrics` feature flag on the `opentelemetry` crate.  *Enabled by
 //!   default*.
+//!
+//! [layer]: tracing_subscriber::layer
 //!
 //! ## Supported Rust Versions
 //!
@@ -104,7 +106,7 @@
 //! [subscriber]: tracing_subscriber::subscribe
 #![deny(unreachable_pub)]
 #![cfg_attr(test, deny(warnings))]
-#![doc(html_root_url = "https://docs.rs/tracing-opentelemetry/0.19.0")]
+#![doc(html_root_url = "https://docs.rs/tracing-opentelemetry/0.22.0")]
 #![doc(
     html_logo_url = "https://raw.githubusercontent.com/tokio-rs/tracing/master/assets/logo-type.png",
     issue_tracker_base_url = "https://github.com/tokio-rs/tracing-opentelemetry/issues/"
@@ -147,4 +149,18 @@ pub struct OtelData {
 
     /// The otel span data recorded during the current tracing span.
     pub builder: opentelemetry::trace::SpanBuilder,
+}
+
+pub(crate) mod time {
+    use std::time::SystemTime;
+
+    #[cfg(not(target_arch = "wasm32"))]
+    pub(crate) fn now() -> SystemTime {
+        SystemTime::now()
+    }
+
+    #[cfg(target_arch = "wasm32")]
+    pub(crate) fn now() -> SystemTime {
+        SystemTime::UNIX_EPOCH + std::time::Duration::from_millis(js_sys::Date::now() as u64)
+    }
 }
