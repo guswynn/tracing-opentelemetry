@@ -123,7 +123,7 @@ impl Instruments {
                 update_or_insert(
                     &self.i64_histogram,
                     metric_name,
-                    || meter.i64_histogram(metric_name).init(),
+                    || meter.f64_histogram(metric_name).init(),
                     |rec| rec.record(value, attributes),
                 );
             }

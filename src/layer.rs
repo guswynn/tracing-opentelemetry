@@ -894,13 +894,16 @@ where
     /// [OpenTelemetry `Span`]: opentelemetry::trace::Span
     /// [tracing `Span`]: tracing::Span
     fn on_new_span(&self, attrs: &Attributes<'_>, id: &span::Id, ctx: Context<'_, S>) {
+        // ask for more information about the span
         let span = ctx.span(id).expect("Span not found, this is a bug");
         let mut extensions = span.extensions_mut();
 
+        // extra busy time feature
         if self.tracked_inactivity && extensions.get_mut::<Timings>().is_none() {
             extensions.insert(Timings::new());
         }
 
+        // get the parent (if it exists), and create the _opentelemetry_ span object
         let parent_cx = self.parent_context(attrs, &ctx);
         let mut builder = self
             .tracer
@@ -908,16 +911,17 @@ where
             .with_start_time(crate::time::now())
             // Eagerly assign span id so children have stable parent id
             .with_span_id(self.tracer.new_span_id());
-
         // Record new trace id if there is no active parent span
         if !parent_cx.has_active_span() {
             builder.trace_id = Some(self.tracer.new_trace_id());
         }
 
+        // add the fields to the builder
         let builder_attrs = builder.attributes.get_or_insert(Vec::with_capacity(
             attrs.fields().len() + self.extra_span_attrs(),
         ));
 
+        // optionally add the filepath
         if self.location {
             let meta = attrs.metadata();
 
@@ -933,7 +937,6 @@ where
                 builder_attrs.push(KeyValue::new("code.lineno", line as i64));
             }
         }
-
         if self.with_threads {
             THREAD_ID.with(|id| builder_attrs.push(KeyValue::new("thread.id", **id as i64)));
             if let Some(name) = std::thread::current().name() {
@@ -945,10 +948,13 @@ where
             }
         }
 
+        // attach the span fields to the otel span
         attrs.record(&mut SpanAttributeVisitor {
             span_builder: &mut builder,
             sem_conv_config: self.sem_conv_config,
         });
+
+        // tell the registry store this span data for us
         extensions.insert(OtelData { builder, parent_cx });
     }
 
@@ -957,16 +963,17 @@ where
             return;
         }
 
+        // ask the registry for the data I stashed
         let span = ctx.span(id).expect("Span not found, this is a bug");
         let mut extensions = span.extensions_mut();
 
+        // edit that data
         if let Some(timings) = extensions.get_mut::<Timings>() {
             let now = Instant::now();
             timings.idle += (now - timings.last).as_nanos() as i64;
             timings.last = now;
         }
     }
-
     fn on_exit(&self, id: &span::Id, ctx: Context<'_, S>) {
         if !self.tracked_inactivity {
             return;
@@ -986,8 +993,10 @@ where
     ///
     /// [`attributes`]: opentelemetry::trace::SpanBuilder::attributes
     fn on_record(&self, id: &Id, values: &Record<'_>, ctx: Context<'_, S>) {
+        // get the data from the registry
         let span = ctx.span(id).expect("Span not found, this is a bug");
         let mut extensions = span.extensions_mut();
+        // add the fields
         if let Some(data) = extensions.get_mut::<OtelData>() {
             values.record(&mut SpanAttributeVisitor {
                 span_builder: &mut data.builder,
@@ -996,6 +1005,7 @@ where
         }
     }
 
+    // talk about when gus understands it??
     fn on_follows_from(&self, id: &Id, follows: &Id, ctx: Context<S>) {
         let span = ctx.span(id).expect("Span not found, this is a bug");
         let mut extensions = span.extensions_mut();
@@ -1037,6 +1047,8 @@ where
     /// [`Error`]: opentelemetry::trace::StatusCode::Error
     fn on_event(&self, event: &Event<'_>, ctx: Context<'_, S>) {
         // Ignore events that are not in the context of a span
+        //
+        // ask the registry for the span data for this events parent, if it has one
         if let Some(span) = ctx.lookup_current() {
             // Performing read operations before getting a write lock to avoid a deadlock
             // See https://github.com/tokio-rs/tracing/issues/763
@@ -1060,7 +1072,11 @@ where
             let target = target.string(meta.target());
 
             // Move out extension data to not hold the extensions lock across the event.record() call, which could result in a deadlock
-            let mut otel_data = span.extensions_mut().remove::<OtelData>();
+            //
+            // Ask the registry for the stash of data for the parent span
+            let mut otel_data = span.extensions_mut().remove::<OtelData>().unwrap("??");
+
+            // ADD THE EVENT TO its parent SPAN, in otel data
             let span_builder = otel_data.as_mut().map(|data| &mut data.builder);
 
             let mut otel_event = otel::Event::new(
