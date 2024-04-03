@@ -1,5 +1,8 @@
 use crate::layer::WithContext;
-use opentelemetry::{trace::SpanContext, Context, Key, KeyValue, Value};
+use opentelemetry::{
+    trace::{SpanContext, TraceContextExt},
+    Context, Key, KeyValue, Value,
+};
 
 /// Utility functions to allow tracing [`Span`]s to accept and return
 /// [OpenTelemetry] [`Context`]s.
@@ -142,6 +145,10 @@ impl OpenTelemetrySpanExt for tracing::Span {
             if let Some(get_context) = subscriber.downcast_ref::<WithContext>() {
                 get_context.with_context(subscriber, id, move |data, _tracer| {
                     if let Some(cx) = cx.take() {
+                        // dbg!(&cx, data.builder.trace_id);
+                        if cx.has_active_span() {
+                            data.builder.trace_id = Some(cx.span().span_context().trace_id());
+                        }
                         data.parent_cx = cx;
                     }
                 });
